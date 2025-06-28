@@ -13,7 +13,7 @@ TunnelEngine is a flexible tunneling engine written in Go, supporting fast IP fo
 
 ### 1. Download Binaries
 
-Pre-built binaries are available on the [GitHub Releases page](https://github.com/yourusername/TunnelEngine/releases).  
+Pre-built binaries are available on the [GitHub Releases page](https://github.com/XrayTree/TunnelEngine/releases).  
 Currently, only the reverse tunnel binaries (`server-linux-amd64`, `client-linux-amd64`) are fully supported and accept the `-config` flag.
 
 > **Note:** Binaries are tested on Ubuntu/Debian. Other OS support and additional features are coming soon.
@@ -91,11 +91,6 @@ On the **client** (freedom/private host):
 - The server will listen for tunnel connections and external user connections.
 - The client will connect to the server and expose your local service.
 
-### 5. How It Works
-
-- External users connect to the server's `userListenAddr` (e.g., `your.server.ip:8080`).
-- The server forwards these connections through the tunnel to the client.
-- The client connects the tunnel stream to the local service at `localListenAddr`.
 
 ## Building from Source
 
