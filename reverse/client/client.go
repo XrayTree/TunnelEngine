@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -52,80 +53,102 @@ func loadPublicKey(path string) (*rsa.PublicKey, error) {
 }
 
 func main() {
-	// Load config
-	file, err := os.Open("client_config.json")
-	if err != nil {
-		log.Fatalf("Failed to open config: %v", err)
-	}
-	defer file.Close()
-	var cfg Config
-	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
-		log.Fatalf("Failed to decode config: %v", err)
-	}
-	// Build yamux.Config from cfg.Yamux
-	yamuxConf := yamux.DefaultConfig()
-	yamuxConf.AcceptBacklog = cfg.Yamux.AcceptBacklog
-	yamuxConf.EnableKeepAlive = cfg.Yamux.EnableKeepAlive
-	yamuxConf.KeepAliveInterval = time.Duration(cfg.Yamux.KeepAliveInterval) * time.Millisecond
-	yamuxConf.ConnectionWriteTimeout = time.Duration(cfg.Yamux.ConnectionWriteTimeout) * time.Millisecond
-	if cfg.Yamux.MaxStreamWindowSize > 0 {
-		yamuxConf.MaxStreamWindowSize = cfg.Yamux.MaxStreamWindowSize
-	}
-
-	// Load server public key (path from config)
-	publicKey, err := loadPublicKey(cfg.PublicKeyPath)
-	if err != nil {
-		log.Fatalf("Failed to load public key: %v", err)
-	}
-
-	log.Println("Connecting to tunnel server at", cfg.TunnelServerAddr)
-	// Connect to tunnel server
-	tunnelConn, err := net.Dial("tcp", cfg.TunnelServerAddr)
-	if err != nil {
-		log.Fatalf("Failed to connect to tunnel server: %v", err)
-	}
-	log.Println("Tunnel TCP connection established")
-
-	// --- AUTHENTICATION HANDSHAKE ---
-	token := []byte(cfg.SecretToken)
-	encToken, err := rsa.EncryptPKCS1v15(rand.Reader, publicKey, token)
-	if err != nil {
-		log.Fatalf("Failed to encrypt token: %v", err)
-	}
-	if _, err := tunnelConn.Write(encToken); err != nil {
-		log.Fatalf("Failed to send encrypted token: %v", err)
-	}
-	log.Println("Sent encrypted token to server for authentication")
-	// --- END AUTHENTICATION HANDSHAKE ---
-
-	// Create yamux client session
-	session, err := yamux.Client(tunnelConn, yamuxConf)
-	if err != nil {
-		log.Fatalf("Failed to create yamux session: %v", err)
-	}
-	log.Println("Yamux session established with server")
-
-	// Accept yamux streams in a loop
+	configPath := flag.String("config", "client_config.json", "Path to config file")
+	flag.Parse()
 	for {
-		stream, err := session.AcceptStream()
+		// Load config
+		file, err := os.Open(*configPath)
 		if err != nil {
-			log.Printf("Failed to accept yamux stream: %v", err)
-			return
+			log.Fatalf("Failed to open config: %v", err)
 		}
-		log.Println("Accepted new yamux stream from server")
-		go func(stream net.Conn) {
-			defer stream.Close()
-			// Connect to local xray-core (or any local service)
-			localConn, err := net.Dial("tcp", cfg.LocalListenAddr)
+		var cfg Config
+		if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+			file.Close()
+			log.Fatalf("Failed to decode config: %v", err)
+		}
+		file.Close()
+		// Build yamux.Config from cfg.Yamux
+		yamuxConf := yamux.DefaultConfig()
+		yamuxConf.AcceptBacklog = cfg.Yamux.AcceptBacklog
+		yamuxConf.EnableKeepAlive = cfg.Yamux.EnableKeepAlive
+		yamuxConf.KeepAliveInterval = time.Duration(cfg.Yamux.KeepAliveInterval) * time.Millisecond
+		yamuxConf.ConnectionWriteTimeout = time.Duration(cfg.Yamux.ConnectionWriteTimeout) * time.Millisecond
+		if cfg.Yamux.MaxStreamWindowSize > 0 {
+			yamuxConf.MaxStreamWindowSize = cfg.Yamux.MaxStreamWindowSize
+		}
+
+		// Load server public key (path from config)
+		publicKey, err := loadPublicKey(cfg.PublicKeyPath)
+		if err != nil {
+			log.Printf("Failed to load public key: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		log.Println("Connecting to tunnel server at", cfg.TunnelServerAddr)
+		// Connect to tunnel server
+		tunnelConn, err := net.Dial("tcp", cfg.TunnelServerAddr)
+		if err != nil {
+			log.Printf("Failed to connect to tunnel server: %v", err)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		log.Println("Tunnel TCP connection established")
+
+		// --- AUTHENTICATION HANDSHAKE ---
+		token := []byte(cfg.SecretToken)
+		encToken, err := rsa.EncryptPKCS1v15(rand.Reader, publicKey, token)
+		if err != nil {
+			log.Printf("Failed to encrypt token: %v", err)
+			tunnelConn.Close()
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		if _, err := tunnelConn.Write(encToken); err != nil {
+			log.Printf("Failed to send encrypted token: %v", err)
+			tunnelConn.Close()
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		log.Println("Sent encrypted token to server for authentication")
+		// --- END AUTHENTICATION HANDSHAKE ---
+
+		// Create yamux client session
+		session, err := yamux.Client(tunnelConn, yamuxConf)
+		if err != nil {
+			log.Printf("Failed to create yamux session: %v", err)
+			tunnelConn.Close()
+			time.Sleep(3 * time.Second)
+			continue
+		}
+		log.Println("Yamux session established with server")
+
+		// Accept yamux streams in a loop
+		for {
+			stream, err := session.AcceptStream()
 			if err != nil {
-				log.Printf("Failed to connect to local service: %v", err)
-				return
+				log.Printf("Failed to accept yamux stream: %v", err)
+				break
 			}
-			log.Println("Connected to local service for new stream")
-			defer localConn.Close()
-			// Forward data between yamux stream and local service
-			go io.Copy(localConn, stream)
-			io.Copy(stream, localConn)
-		}(stream)
+			log.Println("Accepted new yamux stream from server")
+			go func(stream net.Conn) {
+				defer stream.Close()
+				// Connect to local xray-core (or any local service)
+				localConn, err := net.Dial("tcp", cfg.LocalListenAddr)
+				if err != nil {
+					log.Printf("Failed to connect to local service: %v", err)
+					return
+				}
+				log.Println("Connected to local service for new stream")
+				defer localConn.Close()
+				// Forward data between yamux stream and local service
+				go io.Copy(localConn, stream)
+				io.Copy(stream, localConn)
+			}(stream)
+		}
+		session.Close()
+		tunnelConn.Close()
+		log.Println("Connection lost, retrying in 3 seconds...")
+		time.Sleep(3 * time.Second)
 	}
 }

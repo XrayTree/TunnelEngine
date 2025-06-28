@@ -40,3 +40,6 @@ server_config.json
 keys
 key.pem
 cert.pem
+
+# Build output
+builds
