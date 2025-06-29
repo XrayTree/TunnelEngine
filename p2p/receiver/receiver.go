@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -11,10 +12,10 @@ import (
 
 // ReceiverConfig holds the configuration for the receiver server
 type ReceiverConfig struct {
-	ListenAddr string `json:"listenAddr"`
+	ListenAddr  string `json:"listenAddr"`
 	ForwardAddr string `json:"forwardAddr"`
-	CertFile string `json:"certFile"`
-	KeyFile string `json:"keyFile"`
+	CertFile    string `json:"certFile"`
+	KeyFile     string `json:"keyFile"`
 }
 
 func loadReceiverConfig(path string) (*ReceiverConfig, error) {
@@ -33,7 +34,10 @@ func loadReceiverConfig(path string) (*ReceiverConfig, error) {
 }
 
 func main() {
-	cfg, err := loadReceiverConfig("receiver_config.json")
+	configPath := flag.String("config", "receiver_config.json", "Path to config file")
+	flag.Parse()
+
+	cfg, err := loadReceiverConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}

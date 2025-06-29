@@ -30,7 +30,7 @@ type YamuxConfig struct {
 // Config holds client configuration
 type Config struct {
 	TunnelServerAddr string     `json:"tunnelServerAddr"`
-	LocalListenAddr  string     `json:"localListenAddr"`
+	LocalListenAddr  []string     `json:"localListenAddr"`
 	Yamux            YamuxConfig `json:"yamux"`
 	PublicKeyPath    string     `json:"publicKeyPath"`
 	SecretToken      string     `json:"secretToken"`
@@ -124,6 +124,7 @@ func main() {
 		log.Println("Yamux session established with server")
 
 		// Accept yamux streams in a loop
+		var localIdx int
 		for {
 			stream, err := session.AcceptStream()
 			if err != nil {
@@ -131,20 +132,23 @@ func main() {
 				break
 			}
 			log.Println("Accepted new yamux stream from server")
-			go func(stream net.Conn) {
+			// Pick local address in round-robin fashion
+			localAddr := cfg.LocalListenAddr[localIdx]
+			localIdx = (localIdx + 1) % len(cfg.LocalListenAddr)
+			go func(stream net.Conn, localAddr string) {
 				defer stream.Close()
 				// Connect to local xray-core (or any local service)
-				localConn, err := net.Dial("tcp", cfg.LocalListenAddr)
+				localConn, err := net.Dial("tcp", localAddr)
 				if err != nil {
-					log.Printf("Failed to connect to local service: %v", err)
+					log.Printf("Failed to connect to local service at %s: %v", localAddr, err)
 					return
 				}
-				log.Println("Connected to local service for new stream")
+				log.Printf("Connected to local service %s for new stream", localAddr)
 				defer localConn.Close()
 				// Forward data between yamux stream and local service
 				go io.Copy(localConn, stream)
 				io.Copy(stream, localConn)
-			}(stream)
+			}(stream, localAddr)
 		}
 		session.Close()
 		tunnelConn.Close()

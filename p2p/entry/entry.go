@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -31,7 +32,10 @@ func loadEntryConfig(path string) (*EntryConfig, error) {
 }
 
 func main() {
-	cfg, err := loadEntryConfig("entry_config.json")
+	configPath := flag.String("config", "entry_config.json", "Path to config file")
+	flag.Parse()
+
+	cfg, err := loadEntryConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}

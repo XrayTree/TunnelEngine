@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"io"
 	"log"
 	"net"
@@ -30,7 +31,10 @@ func loadConfig(path string) (*Config, error) {
 }
 
 func main() {
-	cfg, err := loadConfig("config.json")
+	configPath := flag.String("config", "config.json", "Path to config file")
+	flag.Parse()
+
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}

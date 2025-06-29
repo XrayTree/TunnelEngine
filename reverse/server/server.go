@@ -20,20 +20,20 @@ import (
 
 // YamuxConfig holds yamux configuration
 type YamuxConfig struct {
-	AcceptBacklog         int    `json:"acceptBacklog"`
-	EnableKeepAlive       bool   `json:"enableKeepAlive"`
-	KeepAliveInterval     int    `json:"keepAliveInterval"`         // milliseconds
-	ConnectionWriteTimeout int    `json:"connectionWriteTimeout"`    // milliseconds
-	MaxStreamWindowSize   uint32 `json:"maxStreamWindowSize"`
+	AcceptBacklog          int    `json:"acceptBacklog"`
+	EnableKeepAlive        bool   `json:"enableKeepAlive"`
+	KeepAliveInterval      int    `json:"keepAliveInterval"`      // milliseconds
+	ConnectionWriteTimeout int    `json:"connectionWriteTimeout"` // milliseconds
+	MaxStreamWindowSize    uint32 `json:"maxStreamWindowSize"`
 }
 
 // Config holds server configuration
 type Config struct {
-	TunnelListenAddr string     `json:"tunnelListenAddr"`
-	UserListenAddr   string     `json:"userListenAddr"`
+	TunnelListenAddr string      `json:"tunnelListenAddr"`
+	UserListenAddr   []string    `json:"userListenAddr"`
 	Yamux            YamuxConfig `json:"yamux"`
-	PrivateKeyPath   string     `json:"privateKeyPath"`
-	SecretToken      string     `json:"secretToken"`
+	PrivateKeyPath   string      `json:"privateKeyPath"`
+	SecretToken      string      `json:"secretToken"`
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -147,39 +147,74 @@ func main() {
 		}
 
 		// Listen for external clients on userListenAddr
-		userListener, err := net.Listen("tcp", cfg.UserListenAddr)
-		if err != nil {
-			log.Printf("Failed to listen for user connections: %v", err)
+		var listeners []net.Listener
+		for _, addr := range cfg.UserListenAddr {
+			l, err := net.Listen("tcp", addr)
+			if err != nil {
+				log.Printf("Failed to listen on %s: %v", addr, err)
+				continue
+			}
+			log.Printf("Listening for external clients on %s", addr)
+			listeners = append(listeners, l)
+		}
+		if len(listeners) == 0 {
+			log.Printf("No user listeners available, retrying in 3 seconds...")
 			session.Close()
 			tunnelConn.Close()
 			time.Sleep(3 * time.Second)
 			continue
 		}
-		log.Printf("Listening for external clients on %s", cfg.UserListenAddr)
 
-		acceptLoop:
-		for {
-			userConn, err := userListener.Accept()
-			if err != nil {
-				log.Printf("Failed to accept user connection: %v", err)
-				break acceptLoop
-			}
-			log.Println("Accepted connection from external client")
-			go func(userConn net.Conn) {
-				defer userConn.Close()
-				// Open a new yamux stream to the client
-				stream, err := session.OpenStream()
-				if err != nil {
-					log.Printf("Failed to open yamux stream: %v", err)
-					return
+		// Accept connections on all listeners
+		stopChan := make(chan struct{})
+		for _, userListener := range listeners {
+			go func(userListener net.Listener) {
+				for {
+					select {
+					case <-stopChan:
+						userListener.Close()
+						return
+					default:
+					}
+					userConn, err := userListener.Accept()
+					if err != nil {
+						select {
+						case <-stopChan:
+							return
+						default:
+							log.Printf("Failed to accept user connection: %v", err)
+							break
+						}
+					}
+					log.Println("Accepted connection from external client")
+					go func(userConn net.Conn) {
+						defer userConn.Close()
+						// Open a new yamux stream to the client
+						stream, err := session.OpenStream()
+						if err != nil {
+							log.Printf("Failed to open yamux stream: %v", err)
+							// If session is closed, signal all listeners to stop
+							select {
+							case <-stopChan:
+								// already closed
+							default:
+								close(stopChan)
+							}
+							return
+						}
+						defer stream.Close()
+						// Forward data between userConn and yamux stream
+						go io.Copy(stream, userConn)
+						io.Copy(userConn, stream)
+					}(userConn)
 				}
-				defer stream.Close()
-				// Forward data between userConn and yamux stream
-				go io.Copy(stream, userConn)
-				io.Copy(userConn, stream)
-			}(userConn)
+			}(userListener)
 		}
-		userListener.Close()
+		// Wait for stopChan to be closed (session or OpenStream failure)
+		<-stopChan
+		for _, l := range listeners {
+			l.Close()
+		}
 		session.Close()
 		tunnelConn.Close()
 		log.Println("Connection lost, retrying in 3 seconds...")
