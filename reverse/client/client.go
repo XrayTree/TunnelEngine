@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -25,6 +26,7 @@ type YamuxConfig struct {
 	KeepAliveInterval     int    `json:"keepAliveInterval"` // milliseconds
 	ConnectionWriteTimeout int    `json:"connectionWriteTimeout"` // milliseconds
 	MaxStreamWindowSize   uint32 `json:"maxStreamWindowSize"`
+	MaxConcurrentConnections int  `json:"maxConcurrentConnections"`
 }
 
 // Config holds client configuration
@@ -34,6 +36,7 @@ type Config struct {
 	Yamux            YamuxConfig `json:"yamux"`
 	PublicKeyPath    string     `json:"publicKeyPath"`
 	SecretToken      string     `json:"secretToken"`
+	UseMux           bool       `json:"useMux"`
 }
 
 func loadPublicKey(path string) (*rsa.PublicKey, error) {
@@ -76,6 +79,7 @@ func main() {
 		if cfg.Yamux.MaxStreamWindowSize > 0 {
 			yamuxConf.MaxStreamWindowSize = cfg.Yamux.MaxStreamWindowSize
 		}
+		maxConcurrentStreams := cfg.Yamux.MaxConcurrentConnections
 
 		// Load server public key (path from config)
 		publicKey, err := loadPublicKey(cfg.PublicKeyPath)
@@ -113,46 +117,86 @@ func main() {
 		log.Println("Sent encrypted token to server for authentication")
 		// --- END AUTHENTICATION HANDSHAKE ---
 
-		// Create yamux client session
-		session, err := yamux.Client(tunnelConn, yamuxConf)
-		if err != nil {
-			log.Printf("Failed to create yamux session: %v", err)
-			tunnelConn.Close()
-			time.Sleep(3 * time.Second)
-			continue
-		}
-		log.Println("Yamux session established with server")
-
-		// Accept yamux streams in a loop
-		var localIdx int
-		for {
-			stream, err := session.AcceptStream()
+		if cfg.UseMux {
+			// Create yamux client session
+			session, err := yamux.Client(tunnelConn, yamuxConf)
 			if err != nil {
-				log.Printf("Failed to accept yamux stream: %v", err)
-				break
+				log.Printf("Failed to create yamux session: %v", err)
+				tunnelConn.Close()
+				time.Sleep(3 * time.Second)
+				continue
 			}
-			log.Println("Accepted new yamux stream from server")
-			// Pick local address in round-robin fashion
+			log.Println("Yamux session established with server")
+
+			// Accept yamux streams in a loop, with concurrency limit
+			var localIdx int
+			var streamCountMu sync.Mutex
+			streamCount := 0
+			for {
+				streamCountMu.Lock()
+				if maxConcurrentStreams > 0 && streamCount >= maxConcurrentStreams {
+					streamCountMu.Unlock()
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				streamCount++
+				streamCountMu.Unlock()
+
+				stream, err := session.AcceptStream()
+				if err != nil {
+					streamCountMu.Lock()
+					streamCount--
+					streamCountMu.Unlock()
+					log.Printf("Failed to accept yamux stream: %v", err)
+					break
+				}
+				log.Println("Accepted new yamux stream from server")
+				// Pick local address in round-robin fashion
+				localAddr := cfg.LocalListenAddr[localIdx]
+				localIdx = (localIdx + 1) % len(cfg.LocalListenAddr)
+				go func(stream net.Conn, localAddr string) {
+					defer stream.Close()
+					defer func() {
+						streamCountMu.Lock()
+						streamCount--
+						streamCountMu.Unlock()
+					}()
+					// Connect to local xray-core (or any local service)
+					localConn, err := net.Dial("tcp", localAddr)
+					if err != nil {
+						log.Printf("Failed to connect to local service at %s: %v", localAddr, err)
+						return
+					}
+					log.Printf("Connected to local service %s for new stream", localAddr)
+					defer localConn.Close()
+					// Forward data between yamux stream and local service
+					go io.Copy(localConn, stream)
+					io.Copy(stream, localConn)
+				}(stream, localAddr)
+			}
+			session.Close()
+			tunnelConn.Close()
+			log.Println("Connection lost, retrying in 3 seconds...")
+			time.Sleep(3 * time.Second)
+		} else {
+			// No yamux: handle tunnel as a single connection
+			var localIdx int
 			localAddr := cfg.LocalListenAddr[localIdx]
 			localIdx = (localIdx + 1) % len(cfg.LocalListenAddr)
-			go func(stream net.Conn, localAddr string) {
-				defer stream.Close()
-				// Connect to local xray-core (or any local service)
-				localConn, err := net.Dial("tcp", localAddr)
-				if err != nil {
-					log.Printf("Failed to connect to local service at %s: %v", localAddr, err)
-					return
-				}
-				log.Printf("Connected to local service %s for new stream", localAddr)
-				defer localConn.Close()
-				// Forward data between yamux stream and local service
-				go io.Copy(localConn, stream)
-				io.Copy(stream, localConn)
-			}(stream, localAddr)
+			localConn, err := net.Dial("tcp", localAddr)
+			if err != nil {
+				log.Printf("Failed to connect to local service at %s: %v", localAddr, err)
+				tunnelConn.Close()
+				time.Sleep(3 * time.Second)
+				continue
+			}
+			log.Printf("Connected to local service %s for tunnel", localAddr)
+			go io.Copy(localConn, tunnelConn)
+			io.Copy(tunnelConn, localConn)
+			localConn.Close()
+			tunnelConn.Close()
+			log.Println("Connection closed, retrying in 3 seconds...")
+			time.Sleep(3 * time.Second)
 		}
-		session.Close()
-		tunnelConn.Close()
-		log.Println("Connection lost, retrying in 3 seconds...")
-		time.Sleep(3 * time.Second)
 	}
 }
