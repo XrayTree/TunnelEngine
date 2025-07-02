@@ -14,7 +14,7 @@ TunnelEngine is a flexible tunneling engine written in Go, supporting fast IP fo
 ### 1. Download Binaries
 
 Pre-built binaries are available on the [GitHub Releases page](https://github.com/XrayTree/TunnelEngine/releases).  
-Currently, only the reverse tunnel binaries (`server-linux-amd64`, `client-linux-amd64`) are fully supported and accept the `-config` flag.
+All binaries (`server-linux-amd64`, `client-linux-amd64`, `receiver-linux-amd64`, `simple-linux-amd64`) now support the `-config` flag.
 
 > **Note:** Binaries are tested on Ubuntu/Debian. Other OS support and additional features are coming soon.
 
@@ -48,7 +48,7 @@ See [`reverse/README.md`](reverse/README.md) for full details. Example:
     "maxStreamWindowSize": 4194304
   },
   "privateKeyPath": "/root/server_private.pem",
-  "secretToken": "9EUocMPxdNgjbU"
+  "secretToken": "somethingsecret"
 }
 ```
 
@@ -107,7 +107,7 @@ See the README in each subfolder for details and advanced usage.
 
 ## Project Status & Roadmap
 
-TunnelEngine is in its early stages. Documentation and support for other OSs are limited. Only the reverse tunnel binaries currently support the `-config` flag. P2P and simple forwarder binaries are under development.
+TunnelEngine is in its early stages. Documentation and support for other OSs are limited. All binaries now support the `-config` flag. P2P and simple forwarder binaries are under development.
 
 - **Tested:** Ubuntu/Debian (x86_64)
 - **Planned:** More documentation, more OS builds, and expanded features.
