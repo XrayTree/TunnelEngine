@@ -38,17 +38,17 @@ See [`reverse/README.md`](reverse/README.md) for full details. Example:
 
 ```json
 {
-    "tunnelListenAddr": "0.0.0.0:9000",
-    "userListenAddr": "0.0.0.0:8080",
-    "yamux": {
-        "acceptBacklog": 128,
-        "enableKeepAlive": true,
-        "keepAliveInterval": 10000,
-        "connectionWriteTimeout": 10000,
-        "maxStreamWindowSize": 16777216
-    },
-    "privateKeyPath": "server_private.pem",
-    "secretToken": "my_secret_token"
+  "tunnelListenAddr": ":9090",
+  "userListenAddr": [":10004", ":10005"], // more ports if needed.
+  "yamux": {
+    "acceptBacklog": 256,
+    "enableKeepAlive": true,
+    "keepAliveInterval": 15000,
+    "connectionWriteTimeout": 30000,
+    "maxStreamWindowSize": 4194304
+  },
+  "privateKeyPath": "/root/server_private.pem",
+  "secretToken": "9EUocMPxdNgjbU"
 }
 ```
 
@@ -58,17 +58,17 @@ See [`reverse/README.md`](reverse/README.md) for full details. Example:
 
 ```json
 {
-    "tunnelServerAddr": "your.server.ip:9000",
-    "localListenAddr": "127.0.0.1:10000",
-    "yamux": {
-        "acceptBacklog": 128,
-        "enableKeepAlive": true,
-        "keepAliveInterval": 10000,
-        "connectionWriteTimeout": 10000,
-        "maxStreamWindowSize": 16777216
-    },
-    "publicKeyPath": "server_public.pem",
-    "secretToken": "my_secret_token"
+  "tunnelServerAddr": "destIp:9090",
+  "localListenAddr": [":10004", ":10005"], // more ports if needed.
+  "yamux": {
+    "acceptBacklog": 256,
+    "enableKeepAlive": true,
+    "keepAliveInterval": 15000,
+    "connectionWriteTimeout": 30000,
+    "maxStreamWindowSize": 4194304
+  },
+  "publicKeyPath": "/root/server_public.pem",
+  "secretToken": "somethingsecret"
 }
 ```
 

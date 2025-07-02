@@ -19,6 +19,20 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
+// BufferPool is a pool of reusable buffers
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024) // 32KB buffer size
+	},
+}
+
+// copyBuffer copies from src to dst using a buffer from the pool
+func copyBuffer(dst io.Writer, src io.Reader) (written int64, err error) {
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+	return io.CopyBuffer(dst, src, buf)
+}
+
 // YamuxConfig holds yamux configuration
 type YamuxConfig struct {
 	AcceptBacklog          int    `json:"acceptBacklog"`
@@ -26,17 +40,15 @@ type YamuxConfig struct {
 	KeepAliveInterval      int    `json:"keepAliveInterval"`      // milliseconds
 	ConnectionWriteTimeout int    `json:"connectionWriteTimeout"` // milliseconds
 	MaxStreamWindowSize    uint32 `json:"maxStreamWindowSize"`
-	MaxConcurrentConnections int  `json:"maxConcurrentConnections"`
 }
 
 // Config holds server configuration
 type Config struct {
-   TunnelListenAddr string      `json:"tunnelListenAddr"`
-   UserListenAddr   []string    `json:"userListenAddr"`
-   Yamux            YamuxConfig `json:"yamux"`
-   PrivateKeyPath   string      `json:"privateKeyPath"`
-   SecretToken      string      `json:"secretToken"`
-   UseMux           bool        `json:"useMux"`
+	TunnelListenAddr string      `json:"tunnelListenAddr"`
+	UserListenAddr   []string    `json:"userListenAddr"`
+	Yamux            YamuxConfig `json:"yamux"`
+	PrivateKeyPath   string      `json:"privateKeyPath"`
+	SecretToken      string      `json:"secretToken"`
 }
 
 func loadPrivateKey(path string) (*rsa.PrivateKey, error) {
@@ -89,7 +101,6 @@ func main() {
 		if cfg.Yamux.MaxStreamWindowSize > 0 {
 			yamuxConf.MaxStreamWindowSize = cfg.Yamux.MaxStreamWindowSize
 		}
-		maxConcurrentStreams := cfg.Yamux.MaxConcurrentConnections
 
 		// Load server private key (path from config)
 		privateKey, err := loadPrivateKey(cfg.PrivateKeyPath)
@@ -141,137 +152,107 @@ func main() {
 		log.Println("Client authenticated successfully")
 		// --- END AUTHENTICATION HANDSHAKE ---
 
-		if cfg.UseMux {
-			// Create yamux server session
-			session, err := yamux.Server(tunnelConn, yamuxConf)
+		// Create yamux server session
+		session, err := yamux.Server(tunnelConn, yamuxConf)
+		if err != nil {
+			log.Printf("Failed to create yamux session: %v", err)
+			tunnelConn.Close()
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		// Listen for external clients on userListenAddr
+		var listeners []net.Listener
+		for _, addr := range cfg.UserListenAddr {
+			l, err := net.Listen("tcp", addr)
 			if err != nil {
-				log.Printf("Failed to create yamux session: %v", err)
-				tunnelConn.Close()
-				time.Sleep(3 * time.Second)
+				log.Printf("Failed to listen on %s: %v", addr, err)
 				continue
 			}
+			log.Printf("Listening for external clients on %s", addr)
+			listeners = append(listeners, l)
+		}
+		if len(listeners) == 0 {
+			log.Printf("No user listeners available, retrying in 3 seconds...")
+			session.Close()
+			tunnelConn.Close()
+			time.Sleep(3 * time.Second)
+			continue
+		}
 
-			// Listen for external clients on userListenAddr
-			var listeners []net.Listener
-			for _, addr := range cfg.UserListenAddr {
-				l, err := net.Listen("tcp", addr)
-				if err != nil {
-					log.Printf("Failed to listen on %s: %v", addr, err)
-					continue
-				}
-				log.Printf("Listening for external clients on %s", addr)
-				listeners = append(listeners, l)
-			}
-			if len(listeners) == 0 {
-				log.Printf("No user listeners available, retrying in 3 seconds...")
-				session.Close()
-				tunnelConn.Close()
-				time.Sleep(3 * time.Second)
-				continue
-			}
-
-			// Accept connections on all listeners
-			stopChan := make(chan struct{})
-			var streamCountMu sync.Mutex
-			streamCount := 0
-			for _, userListener := range listeners {
-				go func(userListener net.Listener) {
-					for {
+		// Accept connections on all listeners
+		stopChan := make(chan struct{})
+		for _, userListener := range listeners {
+			go func(userListener net.Listener) {
+				for {
+					select {
+					case <-stopChan:
+						userListener.Close()
+						return
+					default:
+					}
+					userConn, err := userListener.Accept()
+					if err != nil {
 						select {
 						case <-stopChan:
-							userListener.Close()
 							return
 						default:
-						}
-						userConn, err := userListener.Accept()
-						if err != nil {
-							select {
-							case <-stopChan:
-								return
-							default:
-								log.Printf("Failed to accept user connection: %v", err)
-								break
-							}
-						}
-						log.Println("Accepted connection from external client")
-						go func(userConn net.Conn) {
-							defer userConn.Close()
-							// Limit concurrent yamux streams
-							streamCountMu.Lock()
-							if maxConcurrentStreams > 0 && streamCount >= maxConcurrentStreams {
-								streamCountMu.Unlock()
-								log.Printf("Max concurrent yamux streams reached (%d), rejecting connection", maxConcurrentStreams)
-								return
-							}
-							streamCount++
-							streamCountMu.Unlock()
-							defer func() {
-								streamCountMu.Lock()
-								streamCount--
-								streamCountMu.Unlock()
-							}()
-							// Open a new yamux stream to the client
-							stream, err := session.OpenStream()
-							if err != nil {
-								log.Printf("Failed to open yamux stream: %v", err)
-								// If session is closed, signal all listeners to stop
-								select {
-								case <-stopChan:
-									// already closed
-								default:
-									close(stopChan)
-								}
-								return
-							}
-							defer stream.Close()
-							// Forward data between userConn and yamux stream
-							go io.Copy(stream, userConn)
-							io.Copy(userConn, stream)
-						}(userConn)
-					}
-				}(userListener)
-			}
-	   // (Removed unreachable/duplicate cleanup code)
-		} else {
-			// No yamux: handle tunnel as a single connection
-			for _, addr := range cfg.UserListenAddr {
-				userListener, err := net.Listen("tcp", addr)
-				if err != nil {
-					log.Printf("Failed to listen on %s: %v", addr, err)
-					continue
-				}
-				log.Printf("Listening for external clients on %s (no mux)", addr)
-				go func(userListener net.Listener, tunnelConn net.Conn) {
-					for {
-						userConn, err := userListener.Accept()
-						if err != nil {
 							log.Printf("Failed to accept user connection: %v", err)
 							break
 						}
-						log.Println("Accepted connection from external client (no mux)")
-						go func(userConn net.Conn, tunnelConn net.Conn) {
-							defer userConn.Close()
-							// Forward data directly between userConn and tunnelConn
-							go io.Copy(tunnelConn, userConn)
-							io.Copy(userConn, tunnelConn)
-						}(userConn, tunnelConn)
 					}
-				}(userListener, tunnelConn)
-			}
-			// Wait for tunnelConn to close
-			done := make(chan struct{})
-			go func() {
-				buf := make([]byte, 1)
-				_, err := tunnelConn.Read(buf)
-				if err != nil {
-					close(done)
+					log.Println("Accepted connection from external client")
+					go func(userConn net.Conn) {
+						defer userConn.Close()
+						// Open a new yamux stream to the client
+						stream, err := session.OpenStream()
+						if err != nil {
+							log.Printf("Failed to open yamux stream: %v", err)
+							// If session is closed, signal all listeners to stop
+							select {
+							case <-stopChan:
+								// already closed
+							default:
+								close(stopChan)
+							}
+							return
+						}
+						handleStream(userConn, stream)
+					}(userConn)
 				}
-			}()
-			<-done
-			tunnelConn.Close()
-			log.Println("Tunnel connection closed, retrying in 3 seconds...")
-			time.Sleep(3 * time.Second)
+			}(userListener)
 		}
-	   // (Removed unreachable/duplicate cleanup code)
+		// Wait for stopChan to be closed (session or OpenStream failure)
+		<-stopChan
+		for _, l := range listeners {
+			l.Close()
+		}
+		session.Close()
+		tunnelConn.Close()
+		log.Println("Connection lost, retrying in 3 seconds...")
+		time.Sleep(3 * time.Second)
 	}
+}
+
+// handleStream manages a single stream connection
+func handleStream(userConn net.Conn, stream net.Conn) {
+	defer userConn.Close()
+	defer stream.Close()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Copy from user to stream
+	go func() {
+		defer wg.Done()
+		copyBuffer(stream, userConn)
+	}()
+
+	// Copy from stream to user
+	go func() {
+		defer wg.Done()
+		copyBuffer(userConn, stream)
+	}()
+
+	wg.Wait()
 }
